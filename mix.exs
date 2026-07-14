@@ -58,14 +58,14 @@ defmodule ElixirGpui.MixProject do
   defp aliases do
     [
       setup: ["deps.get"],
-      "ui.build": [&build_ui/1],
-      "ui.serve": [&serve_ui/1],
+      "assets.build": [&build_assets/1],
+      "assets.serve": [&serve_assets/1],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
     ]
   end
 
-  defp build_ui(_), do: run_trunk(["build", "--release"])
-  defp serve_ui(_), do: run_trunk(["serve"])
+  defp build_assets(_), do: run_trunk(["build", "--release"])
+  defp serve_assets(_), do: run_trunk(["serve"])
 
   defp run_trunk(arguments) do
     trunk =
@@ -83,7 +83,7 @@ defmodule ElixirGpui.MixProject do
     path = Path.dirname(rustc) <> ":" <> System.get_env("PATH", "")
 
     case System.cmd(trunk, arguments,
-           cd: "ui",
+           cd: "assets",
            env: [{"PATH", path}, {"NO_COLOR", "true"}],
            into: IO.stream(:stdio, :line),
            stderr_to_stdout: true

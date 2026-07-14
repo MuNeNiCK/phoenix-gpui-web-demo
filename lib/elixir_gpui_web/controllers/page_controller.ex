@@ -9,7 +9,7 @@ defmodule ElixirGpuiWeb.PageController do
     else
       conn
       |> put_resp_content_type("text/plain")
-      |> send_resp(503, "GPUI Web has not been built. Run `mix ui.build` first.\n")
+      |> send_resp(503, "GPUI Web has not been built. Run `mix assets.build` first.\n")
     end
   end
 end

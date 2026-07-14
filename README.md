@@ -39,16 +39,16 @@ rustup toolchain install nightly --component rust-src --target wasm32-unknown-un
 cargo install trunk --locked
 ```
 
-Trunk is only the browser asset builder: it compiles the Rust entry point,
-runs `wasm-bindgen`, and copies the generated JavaScript/WASM into
+Trunk is only the browser asset builder: it compiles the Rust entry point in
+`assets/`, runs `wasm-bindgen`, and copies the generated JavaScript/WASM into
 `priv/static`. The project-specific shell wrapper has been removed; the build
-is now invoked directly by the Mix alias.
+is now invoked directly by Mix aliases.
 
 ## Run
 
 ```sh
 mix setup
-mix ui.build
+mix assets.build
 mix phx.server
 ```
 
@@ -59,7 +59,7 @@ For repeated UI development, run Phoenix and Trunk in separate terminals:
 
 ```sh
 mix phx.server
-mix ui.serve
+mix assets.serve
 ```
 
 Open <http://localhost:8080>. The UI uses the Phoenix server on port 4000 for
@@ -83,5 +83,5 @@ currently requires WebGPU and does not automatically fall back to WebGL2.
 
 ```sh
 mix precommit
-mix ui.build
+mix assets.build
 ```

@@ -25,8 +25,8 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 elixir_gpui-*.tar
 
-# Rust/Trunk build outputs. Build them with `mix ui.build`.
-/ui/target/
-/ui/dist/
+# Rust/Trunk build outputs. Build them with `mix assets.build`.
+/assets/target/
+/assets/dist/
 /priv/static/assets/
 /priv/static/index.html
