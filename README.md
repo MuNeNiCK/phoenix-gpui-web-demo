@@ -1,4 +1,4 @@
-# Elixir + GPUI Web collaborative editor
+# Phoenix + GPUI Web editor
 
 This demo is a browser-based collaborative editor. GPUI Web renders the Rust
 UI to a WebGPU canvas, Yrs owns the browser CRDT, and Phoenix coordinates a
@@ -17,13 +17,19 @@ Yrs-compatible CRDT logic inside the BEAM. Browser Rust is compiled separately
 to WebAssembly and does not use Rustler. Both sides use the y-sync v1 protocol,
 so reconnects exchange only missing CRDT updates.
 
+[`phoenix-channel-client`](https://crates.io/crates/phoenix-channel-client)
+manages the Channel lifecycle, heartbeat, and reconnection behavior. The
+browser transport is provided by
+[`phoenix-channel-runtime-web`](https://crates.io/crates/phoenix-channel-runtime-web).
+
 The shared document is currently kept in memory for the lifetime of the
 Phoenix application. Authentication, durable persistence, and cursor awareness
 are intentionally outside this demo's scope.
 
-The Zed and [Guise](https://github.com/wess/guise) dependencies are pinned to
-compatible revisions because GPUI Web is not yet published as a standalone
-crate. Phoenix supplies the COOP and COEP headers required by GPUI Web.
+The editor interface uses
+[GPUI Component](https://github.com/longbridge/gpui-component). Its Web-capable
+revision and the matching Zed dependency graph are recorded in `Cargo.lock`
+because GPUI Web is not yet published as a standalone crate.
 
 ## Requirements
 
@@ -52,7 +58,7 @@ mix assets.build
 mix phx.server
 ```
 
-Open <http://localhost:4000> in two tabs. Both tabs join the `demo` document;
+Open <http://localhost:4000> in two tabs. Both tabs join the `shared-notes` document;
 edits in either tab are synchronized with the other.
 
 For repeated UI development, run Phoenix and Trunk in separate terminals:
