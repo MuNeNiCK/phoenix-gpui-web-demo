@@ -12,17 +12,21 @@ path = "src/main.rs"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "74798c68d5c63d31e2ccca5c8f5ec0a02c90679c", version = "=0.2.2" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "74798c68d5c63d31e2ccca5c8f5ec0a02c90679c" }
 guise-ui = { git = "https://github.com/wess/guise", rev = "a18275aac720b915ede87b6356b2def76633ea74", default-features = false }
-serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 log = "0.4"
+yrs = { version = "=0.25.0", features = ["sync"] }
+base64 = "0.22"
+futures = "0.3"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gloo-net = { version = "0.6", features = ["json"] }
+gloo-net = { version = "0.6", features = ["websocket"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 # Keep the browser ABI aligned with the pinned Zed revision. Newer compatible
 # semver releases currently break wasm_thread's worker callback at runtime.
 wasm-bindgen = "=0.2.120"
 wasm-bindgen-futures = "=0.4.70"
 js-sys = "=0.3.97"
-web-sys = { version = "=0.3.97", features = ["Document", "Element", "Window"] }
+web-sys = { version = "=0.3.97", features = ["Document", "Element", "Location", "Window"] }
 
 [patch.crates-io]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "74798c68d5c63d31e2ccca5c8f5ec0a02c90679c", version = "=0.2.2" }

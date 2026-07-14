@@ -44,7 +44,8 @@ defmodule ElixirGpui.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      {:y_ex, "~> 0.10.5"}
     ]
   end
 
@@ -57,8 +58,38 @@ defmodule ElixirGpui.MixProject do
   defp aliases do
     [
       setup: ["deps.get"],
-      "ui.build": ["cmd bash scripts/ui-build.sh"],
+      "ui.build": [&build_ui/1],
+      "ui.serve": [&serve_ui/1],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
     ]
+  end
+
+  defp build_ui(_), do: run_trunk(["build", "--release"])
+  defp serve_ui(_), do: run_trunk(["serve"])
+
+  defp run_trunk(arguments) do
+    trunk =
+      System.find_executable("trunk") ||
+        Mix.raise("Trunk is unavailable. Install it with: cargo install trunk --locked")
+
+    rustc =
+      case System.cmd("rustup", ["which", "--toolchain", "nightly", "rustc"],
+             stderr_to_stdout: true
+           ) do
+        {path, 0} -> String.trim(path)
+        {output, _status} -> Mix.raise("Rust nightly is unavailable:\n#{output}")
+      end
+
+    path = Path.dirname(rustc) <> ":" <> System.get_env("PATH", "")
+
+    case System.cmd(trunk, arguments,
+           cd: "ui",
+           env: [{"PATH", path}, {"NO_COLOR", "true"}],
+           into: IO.stream(:stdio, :line),
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> :ok
+      {_output, status} -> Mix.raise("Trunk failed with status #{status}")
+    end
   end
 end

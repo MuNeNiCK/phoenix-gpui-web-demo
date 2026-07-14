@@ -11,9 +11,8 @@ defmodule ElixirGpui.Application do
       ElixirGpuiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:elixir_gpui, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: ElixirGpui.PubSub},
-      # Start a worker by calling: ElixirGpui.Worker.start_link(arg)
-      # {ElixirGpui.Worker, arg},
-      # Start to serve requests, typically the last entry
+      {Registry, keys: :unique, name: ElixirGpui.Collaboration.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: ElixirGpui.Collaboration.Supervisor},
       ElixirGpuiWeb.Endpoint
     ]
 
