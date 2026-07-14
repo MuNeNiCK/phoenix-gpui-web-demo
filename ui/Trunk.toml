@@ -1,0 +1,16 @@
+[build]
+target = "index.html"
+dist = "../priv/static"
+public_url = "/"
+no_sri = true
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false
+
+headers = { "Cross-Origin-Embedder-Policy" = "require-corp", "Cross-Origin-Opener-Policy" = "same-origin" }
+
+[[proxy]]
+backend = "http://127.0.0.1:4000/api/"
+rewrite = "/api/"

@@ -1,0 +1,36 @@
+[package]
+name = "elixir-gpui-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "elixir-gpui-web"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "74798c68d5c63d31e2ccca5c8f5ec0a02c90679c", version = "=0.2.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "74798c68d5c63d31e2ccca5c8f5ec0a02c90679c" }
+guise-ui = { git = "https://github.com/wess/guise", rev = "a18275aac720b915ede87b6356b2def76633ea74", default-features = false }
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+gloo-net = { version = "0.6", features = ["json"] }
+# Keep the browser ABI aligned with the pinned Zed revision. Newer compatible
+# semver releases currently break wasm_thread's worker callback at runtime.
+wasm-bindgen = "=0.2.120"
+wasm-bindgen-futures = "=0.4.70"
+js-sys = "=0.3.97"
+web-sys = { version = "=0.3.97", features = ["Document", "Element", "Window"] }
+
+[patch.crates-io]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "74798c68d5c63d31e2ccca5c8f5ec0a02c90679c", version = "=0.2.2" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"
