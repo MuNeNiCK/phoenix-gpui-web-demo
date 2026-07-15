@@ -3,14 +3,16 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::{FutureExt, StreamExt, select};
 use gpui::prelude::*;
 use gpui::{
-    App, AsyncApp, Bounds, Context, Entity, FontWeight, SharedString, Subscription, Task,
-    WeakEntity, Window, WindowBounds, WindowOptions, div, px, size,
+    Anchor, App, AsyncApp, Bounds, Context, Entity, FontFallbacks, FontWeight, Hsla, SharedString,
+    Subscription, Task, WeakEntity, Window, WindowBounds, WindowOptions, div, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Root, Selectable, Sizable, Theme, ThemeMode,
+    ActiveTheme, Root, Selectable, Sizable, Theme, ThemeMode, ThemeRegistry,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
+    menu::{DropdownMenu as _, PopupMenuItem},
     tag::Tag,
+    try_parse_color,
 };
 use phoenix_channel_client::{
     Channel, ChannelEvent, Options as ChannelOptions, Socket, SocketEvent, static_join_payload,
@@ -18,6 +20,7 @@ use phoenix_channel_client::{
 use phoenix_channel_runtime::{Payload, ProtocolEvent};
 use phoenix_channel_runtime_web::{WebConnector, WebTimer};
 use serde_json::json;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::time::Duration;
 use yrs::sync::{Awareness, DefaultProtocol, Message, Protocol, SyncMessage};
@@ -26,6 +29,13 @@ use yrs::{Doc, GetString, OffsetKind, Options, ReadTxn, Text as YText, TextRef, 
 
 const DOCUMENT_ID: &str = "shared-notes";
 const TOPIC: &str = "documents:shared-notes";
+const JAPANESE_FONT_FAMILY: &str = "Noto Sans JP";
+const EMBEDDED_THEMES: &[&str] = &[
+    include_str!("../themes/ayu.json"),
+    include_str!("../themes/catppuccin.json"),
+    include_str!("../themes/gruvbox.json"),
+    include_str!("../themes/tokyonight.json"),
+];
 
 thread_local! {
     // `Platform::run` returns immediately in the browser. Retain GPUI's app
@@ -307,7 +317,7 @@ impl Render for WorkspaceApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let background = theme.background;
-        let foreground = theme.foreground;
+        let foreground = active_theme_foreground(theme);
         let muted_foreground = theme.muted_foreground;
         let border = theme.border;
         let sidebar = theme.sidebar;
@@ -318,7 +328,10 @@ impl Render for WorkspaceApp {
         let primary = theme.primary;
         let font = theme.font_family.clone();
         let mono_font = theme.mono_font_family.clone();
-        let is_dark = theme.is_dark();
+        let mut default_font = gpui::font(font);
+        default_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            JAPANESE_FONT_FAMILY.to_string(),
+        ]));
         let value = self.editor.read(cx).value();
         let line_count = value.lines().count().max(1);
         let character_count = value.chars().count();
@@ -407,14 +420,29 @@ impl Render for WorkspaceApp {
                         Button::new("theme-toggle")
                             .small()
                             .ghost()
-                            .label(if is_dark { "Light" } else { "Dark" })
-                            .on_click(|_, window, cx| {
-                                let next = if cx.theme().is_dark() {
-                                    ThemeMode::Light
-                                } else {
-                                    ThemeMode::Dark
-                                };
-                                Theme::change(next, Some(window), cx);
+                            .label(cx.theme().theme_name().clone())
+                            .dropdown_caret(true)
+                            .dropdown_menu_with_anchor(Anchor::TopRight, |menu, _, cx| {
+                                let active_theme = cx.theme().theme_name().clone();
+                                let themes = ThemeRegistry::global(cx)
+                                    .sorted_themes()
+                                    .into_iter()
+                                    .map(|theme| theme.name.clone())
+                                    .collect::<Vec<_>>();
+
+                                themes
+                                    .into_iter()
+                                    .fold(menu, |menu, theme_name| {
+                                        let checked = theme_name == active_theme;
+                                        menu.item(
+                                            PopupMenuItem::new(theme_name.clone())
+                                                .checked(checked)
+                                                .on_click(move |_, window, cx| {
+                                                    select_theme(&theme_name, window, cx);
+                                                }),
+                                        )
+                                    })
+                                    .scrollable(true)
                             }),
                     ),
             );
@@ -542,7 +570,12 @@ impl Render for WorkspaceApp {
             .flex_1()
             .min_h(px(0.0))
             .p(px(10.0))
-            .child(Input::new(&self.search).small().w_full())
+            .child(
+                Input::new(&self.search)
+                    .small()
+                    .w_full()
+                    .text_color(foreground),
+            )
             .child(
                 div()
                     .mt(px(12.0))
@@ -743,6 +776,7 @@ impl Render for WorkspaceApp {
                     Input::new(&self.editor)
                         .h_full()
                         .w_full()
+                        .text_color(foreground)
                         .appearance(false)
                         .bordered(false)
                         .focus_bordered(false),
@@ -786,7 +820,7 @@ impl Render for WorkspaceApp {
             .flex_col()
             .bg(background)
             .text_color(foreground)
-            .font_family(font)
+            .font(default_font)
             .child(title_bar)
             .child(
                 div()
@@ -991,6 +1025,45 @@ fn handle_socket_event(this: &WeakEntity<WorkspaceApp>, cx: &mut AsyncApp, event
     }
 }
 
+fn load_embedded_themes(cx: &mut App) {
+    for theme in EMBEDDED_THEMES {
+        ThemeRegistry::global_mut(cx)
+            .load_themes_from_str(theme)
+            .expect("failed to load an embedded theme");
+    }
+}
+
+fn active_theme_foreground(theme: &Theme) -> Hsla {
+    let config = if theme.is_dark() {
+        &theme.dark_theme
+    } else {
+        &theme.light_theme
+    };
+
+    config
+        .colors
+        .foreground
+        .as_deref()
+        .and_then(|color| try_parse_color(color).ok())
+        .unwrap_or(theme.foreground)
+}
+
+fn select_theme(theme_name: &str, window: &mut Window, cx: &mut App) {
+    let Some(next_theme) = ThemeRegistry::global(cx).themes().get(theme_name).cloned() else {
+        return;
+    };
+
+    let mode = next_theme.mode;
+    let theme = Theme::global_mut(cx);
+    if mode.is_dark() {
+        theme.dark_theme = next_theme;
+    } else {
+        theme.light_theme = next_theme;
+    }
+    Theme::change(mode, Some(window), cx);
+    cx.refresh_windows();
+}
+
 fn main() {
     gpui_platform::web_init();
     log::set_max_level(log::LevelFilter::Info);
@@ -1004,6 +1077,12 @@ fn main() {
 
     let application = gpui_platform::single_threaded_web().run_embedded(|cx: &mut App| {
         gpui_component::init(cx);
+        load_embedded_themes(cx);
+        cx.text_system()
+            .add_fonts(vec![Cow::Borrowed(
+                include_bytes!("../fonts/NotoSansJP-Regular.otf").as_slice(),
+            )])
+            .expect("failed to load the bundled Japanese font");
         Theme::change(ThemeMode::Dark, None, cx);
         cx.global_mut::<Theme>().font_family = "IBM Plex Sans".into();
         cx.global_mut::<Theme>().mono_font_family = "Lilex".into();
