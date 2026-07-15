@@ -2272,7 +2272,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/refmdio/gpui-component?rev=ecfd7d512d9688b9193437064b62daf8785baed0#ecfd7d512d9688b9193437064b62daf8785baed0"
+source = "git+https://github.com/refmdio/gpui-component?branch=fix%2Feditor-gutter-background#5ddab3bb20bc28a0ce19ba8c6b3a5d470796f2c3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2320,7 +2320,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/refmdio/gpui-component?rev=ecfd7d512d9688b9193437064b62daf8785baed0#ecfd7d512d9688b9193437064b62daf8785baed0"
+source = "git+https://github.com/refmdio/gpui-component?branch=fix%2Feditor-gutter-background#5ddab3bb20bc28a0ce19ba8c6b3a5d470796f2c3"
 dependencies = [
  "anyhow",
  "gpui",
@@ -2334,7 +2334,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/refmdio/gpui-component?rev=ecfd7d512d9688b9193437064b62daf8785baed0#ecfd7d512d9688b9193437064b62daf8785baed0"
+source = "git+https://github.com/refmdio/gpui-component?branch=fix%2Feditor-gutter-background#5ddab3bb20bc28a0ce19ba8c6b3a5d470796f2c3"
 dependencies = [
  "proc-macro2",
  "quote",
