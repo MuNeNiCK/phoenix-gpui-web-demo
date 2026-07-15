@@ -11,6 +11,7 @@ defmodule ElixirGpui.Application do
       ElixirGpuiWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:elixir_gpui, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: ElixirGpui.PubSub},
+      ElixirGpui.Collaboration.DocumentCatalog,
       {Registry, keys: :unique, name: ElixirGpui.Collaboration.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: ElixirGpui.Collaboration.Supervisor},
       ElixirGpuiWeb.Endpoint

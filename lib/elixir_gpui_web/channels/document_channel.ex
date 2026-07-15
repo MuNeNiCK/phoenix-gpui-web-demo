@@ -1,18 +1,21 @@
 defmodule ElixirGpuiWeb.DocumentChannel do
   use ElixirGpuiWeb, :channel
 
-  alias ElixirGpui.Collaboration.RoomServer
+  alias ElixirGpui.Collaboration.{DocumentCatalog, RoomServer}
 
   @max_encoded_message_size 1_400_000
   @max_message_size 1_048_576
   @document_id ~r/\A[a-zA-Z0-9_-]{1,64}\z/
 
   @impl true
-  def join("documents:" <> document_id, %{"client_id" => encoded_client_id}, socket)
+  def join("documents:" <> document_id, %{"client_id" => encoded_client_id} = payload, socket)
       when is_binary(encoded_client_id) do
     case Integer.parse(encoded_client_id) do
-      {client_id, ""} when client_id >= 0 -> join_document(document_id, client_id, socket)
-      _ -> {:error, %{reason: "invalid client id"}}
+      {client_id, ""} when client_id >= 0 ->
+        join_document(document_id, client_id, Map.get(payload, "documents", []), socket)
+
+      _ ->
+        {:error, %{reason: "invalid client id"}}
     end
   end
 
@@ -54,6 +57,16 @@ defmodule ElixirGpuiWeb.DocumentChannel do
   end
 
   @impl true
+  def handle_info({:documents_updated, documents}, socket) do
+    push(socket, "documents", %{documents: documents})
+    {:noreply, socket}
+  end
+
+  def handle_info(:push_documents, socket) do
+    push(socket, "documents", %{documents: DocumentCatalog.list()})
+    {:noreply, socket}
+  end
+
   def handle_info({:DOWN, _ref, :process, room, _reason}, %{assigns: %{room: room}} = socket) do
     {:stop, :document_unavailable, socket}
   end
@@ -74,9 +87,12 @@ defmodule ElixirGpuiWeb.DocumentChannel do
 
   def terminate(_reason, _socket), do: :ok
 
-  defp join_document(document_id, client_id, socket) do
+  defp join_document(document_id, client_id, documents, socket) do
     with true <- Regex.match?(@document_id, document_id),
          {:ok, room} <- RoomServer.ensure_started(document_id) do
+      :ok = DocumentCatalog.merge(documents)
+      :ok = DocumentCatalog.subscribe()
+      send(self(), :push_documents)
       Process.monitor(room)
       {:ok, assign(socket, room: room, document_id: document_id, client_id: client_id)}
     else

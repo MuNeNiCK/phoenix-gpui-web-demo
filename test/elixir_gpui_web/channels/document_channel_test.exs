@@ -73,4 +73,31 @@ defmodule ElixirGpuiWeb.DocumentChannelTest do
     :ok = close(first)
     assert_push "awareness_leave", %{client_id: "11"}
   end
+
+  test "shares created documents with connected clients" do
+    suffix = System.unique_integer([:positive])
+    document_id = "created-#{suffix}"
+    document = %{"id" => document_id, "title" => "Created #{suffix}.md"}
+
+    {:ok, _, _first} =
+      UserSocket
+      |> socket("catalog-first", %{})
+      |> subscribe_and_join(DocumentChannel, "documents:shared-notes", %{
+        "client_id" => "31"
+      })
+
+    assert_push "documents", %{documents: initial_documents}
+    refute Enum.any?(initial_documents, &(&1["id"] == document_id))
+
+    {:ok, _, _second} =
+      UserSocket
+      |> socket("catalog-second", %{})
+      |> subscribe_and_join(DocumentChannel, "documents:#{document_id}", %{
+        "client_id" => "32",
+        "documents" => [document]
+      })
+
+    assert_push "documents", %{documents: documents}
+    assert Enum.any?(documents, &(&1 == document))
+  end
 end

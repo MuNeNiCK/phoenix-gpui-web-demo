@@ -5,6 +5,20 @@ defmodule ElixirGpui.Collaboration.RoomServer do
 
   alias Yex.Sync
 
+  @readme """
+  # Elixir GPUI Workspace
+
+  Welcome to the collaborative Markdown editor built with GPUI, Phoenix, and Yrs.
+
+  ## Getting started
+
+  - Create a document with the **+** button in the sidebar.
+  - Open the same workspace in another browser to edit together.
+  - Switch between Editor, Split, and Preview modes from the toolbar.
+
+  Changes and collaborator cursors are synchronized in real time.
+  """
+
   @registry ElixirGpui.Collaboration.Registry
   @supervisor ElixirGpui.Collaboration.Supervisor
 
@@ -37,6 +51,7 @@ defmodule ElixirGpui.Collaboration.RoomServer do
   @impl true
   def init(options, state) do
     document_id = Keyword.fetch!(options, :document_id)
+    seed_document(document_id, state.doc)
     {:ok, assign(state, document_id: document_id, topic: "documents:#{document_id}")}
   end
 
@@ -57,4 +72,12 @@ defmodule ElixirGpui.Collaboration.RoomServer do
   end
 
   defp via(document_id), do: {:via, Registry, {@registry, document_id}}
+
+  defp seed_document("readme", doc) do
+    doc
+    |> Yex.Doc.get_text("content")
+    |> Yex.Text.insert(0, @readme)
+  end
+
+  defp seed_document(_document_id, _doc), do: :ok
 end

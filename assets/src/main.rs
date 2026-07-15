@@ -42,8 +42,8 @@ use yrs::{
     Text as YText, TextRef, Transact,
 };
 
-const DOCUMENT_ID: &str = "shared-notes";
-const TOPIC: &str = "documents:shared-notes";
+const DEFAULT_DOCUMENT_ID: &str = "readme";
+const DOCUMENTS_STORAGE_KEY: &str = "elixir-gpui.documents";
 const JAPANESE_FONT_FAMILY: &str = "Noto Sans JP";
 const EMBEDDED_THEMES: &[&str] = &[
     include_str!("../themes/ayu.json"),
@@ -114,6 +114,12 @@ struct RemoteCursor {
     offset: usize,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WorkspaceDocument {
+    id: String,
+    title: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Editor,
@@ -129,7 +135,10 @@ struct WorkspaceApp {
     text: TextRef,
     editor: Entity<InputState>,
     search: Entity<InputState>,
+    new_document_title: Entity<InputState>,
     theme_select: Entity<SelectState<Vec<SharedString>>>,
+    documents: Vec<WorkspaceDocument>,
+    document_id: String,
     connection: ConnectionState,
     view_mode: ViewMode,
     outbound: UnboundedSender<ClientCommand>,
@@ -162,6 +171,8 @@ impl WorkspaceApp {
                 .placeholder("Start writing...")
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search files"));
+        let new_document_title =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Document title"));
         let themes = ThemeRegistry::global(cx)
             .sorted_themes()
             .into_iter()
@@ -224,7 +235,15 @@ impl WorkspaceApp {
             },
         );
 
-        let socket_task = Self::socket_task(cx, awareness.client_id(), receiver);
+        let document_id = DEFAULT_DOCUMENT_ID.to_string();
+        let documents = load_documents();
+        let socket_task = Self::socket_task(
+            cx,
+            document_id.clone(),
+            documents.clone(),
+            awareness.client_id(),
+            receiver,
+        );
 
         Self {
             awareness,
@@ -234,7 +253,10 @@ impl WorkspaceApp {
             text,
             editor,
             search,
+            new_document_title,
             theme_select,
+            documents,
+            document_id,
             connection: ConnectionState::Connecting,
             view_mode: ViewMode::Split,
             outbound,
@@ -444,8 +466,100 @@ impl WorkspaceApp {
             .unbounded_send(ClientCommand::Awareness(message));
     }
 
+    fn open_document(&mut self, document_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.document_id == document_id {
+            return;
+        }
+
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        let text = doc.get_or_insert_text("content");
+        let awareness = Awareness::with_clock(doc, || js_sys::Date::now() as u64);
+        awareness
+            .set_local_state(AwarenessState {
+                user: self.local_user.clone(),
+                cursor: None,
+            })
+            .expect("failed to initialize awareness state");
+
+        let (outbound, receiver) = unbounded();
+        let socket_task = Self::socket_task(
+            cx,
+            document_id.clone(),
+            self.documents.clone(),
+            awareness.client_id(),
+            receiver,
+        );
+
+        self.document_id = document_id;
+        self.awareness = awareness;
+        self.text = text;
+        self.local_cursor = None;
+        self.editor_focused = false;
+        self.connection = ConnectionState::Connecting;
+        self.outbound = outbound;
+        self._socket_task = socket_task;
+        self.editor
+            .update(cx, |editor, cx| editor.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn create_document(
+        &mut self,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(title) = document_title(title) else {
+            return false;
+        };
+
+        if let Some(document) = self
+            .documents
+            .iter()
+            .find(|document| document.title.eq_ignore_ascii_case(&title))
+            .cloned()
+        {
+            self.open_document(document.id, window, cx);
+            return true;
+        }
+
+        let base_id = document_id_from_title(&title);
+        let mut document_id = base_id.clone();
+        let mut suffix = 2;
+        while self
+            .documents
+            .iter()
+            .any(|document| document.id == document_id)
+        {
+            document_id = format!("{base_id}-{suffix}");
+            suffix += 1;
+        }
+
+        self.documents.push(WorkspaceDocument {
+            id: document_id.clone(),
+            title,
+        });
+        save_documents(&self.documents);
+        self.open_document(document_id, window, cx);
+        true
+    }
+
+    fn apply_documents(&mut self, documents: Vec<WorkspaceDocument>, cx: &mut Context<Self>) {
+        if documents.is_empty() {
+            return;
+        }
+        self.documents = normalize_documents(documents);
+        save_documents(&self.documents);
+        cx.notify();
+    }
+
     fn socket_task(
         cx: &mut Context<Self>,
+        document_id: String,
+        documents: Vec<WorkspaceDocument>,
         client_id: u64,
         mut receiver: UnboundedReceiver<ClientCommand>,
     ) -> Task<()> {
@@ -463,9 +577,13 @@ impl WorkspaceApp {
             let (socket, driver) = Socket::new(WebConnector::new(url), WebTimer, options);
             wasm_bindgen_futures::spawn_local(driver);
 
+            let topic = format!("documents:{document_id}");
             let mut channel = match socket.channel(
-                TOPIC,
-                static_join_payload(json!({"client_id": client_id.to_string()})),
+                &topic,
+                static_join_payload(json!({
+                    "client_id": client_id.to_string(),
+                    "documents": documents,
+                })),
             ) {
                 Ok(channel) => channel,
                 Err(error) => {
@@ -611,28 +729,78 @@ impl Render for WorkspaceApp {
         let query = search_query.trim().to_lowercase();
         let matches = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
         let mut files = Vec::new();
-        if matches("shared-notes.md") {
+        for document in self
+            .documents
+            .iter()
+            .filter(|document| matches(&document.title))
+        {
+            let app = cx.entity();
+            let document_id = document.id.clone();
             files.push(
-                SidebarMenuItem::new("shared-notes.md")
+                SidebarMenuItem::new(document.title.clone())
                     .icon(IconName::File)
-                    .active(true),
+                    .active(document.id == self.document_id)
+                    .on_click(move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.open_document(document_id.clone(), window, cx)
+                        });
+                    }),
             );
-        }
-        if matches("README.md") {
-            files.push(SidebarMenuItem::new("README.md").icon(IconName::File));
-        }
-        if matches("lib") {
-            files.push(SidebarMenuItem::new("lib").icon(IconName::Folder));
-        }
-        if matches("config") {
-            files.push(SidebarMenuItem::new("config").icon(IconName::Folder));
         }
         if files.is_empty() {
             files.push(SidebarMenuItem::new("No matching files").disable(true));
         }
 
+        let new_document_title = self.new_document_title.clone();
+        let app = cx.entity();
+        let new_document_button = Button::new("new-document")
+            .icon(IconName::Plus)
+            .tooltip("New document")
+            .on_click(move |_, window, cx| {
+                let input = new_document_title.clone();
+                input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+
+                let app = app.clone();
+                window.open_dialog(cx, move |dialog, window, cx| {
+                    input.update(cx, |input, cx| input.focus(window, cx));
+                    dialog
+                        .title("Create document")
+                        .child(
+                            v_form().child(
+                                field()
+                                    .label("Title")
+                                    .child(Input::new(&input).prefix(IconName::File)),
+                            ),
+                        )
+                        .on_ok({
+                            let app = app.clone();
+                            let input = input.clone();
+                            move |_, window, cx| {
+                                let title = input.read(cx).value();
+                                app.update(cx, |this, cx| {
+                                    this.create_document(title.as_ref(), window, cx)
+                                })
+                            }
+                        })
+                });
+            });
+
         let sidebar = Sidebar::new("workspace-sidebar")
-            .header(Input::new(&self.search))
+            .header(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        Input::new(&self.search)
+                            .prefix(IconName::Search)
+                            .flex_1()
+                            .min_w_0(),
+                    )
+                    .child(new_document_button),
+            )
             .child(SidebarGroup::new("Workspace").child(SidebarMenu::new().children(files)))
             .footer(
                 Button::new("settings")
@@ -775,7 +943,7 @@ impl Render for WorkspaceApp {
 
         let status = StatusBar::new()
             .left(connection_detail)
-            .left(format!("Document: {DOCUMENT_ID}"))
+            .left(format!("Document: {}", self.document_id))
             .right(format!("{line_count} lines"))
             .right("UTF-8")
             .right("Markdown")
@@ -912,6 +1080,96 @@ fn utf16_offset_to_byte(value: &str, offset: u32) -> usize {
         utf16_offset += character.len_utf16() as u32;
     }
     value.len()
+}
+
+fn default_documents() -> Vec<WorkspaceDocument> {
+    vec![WorkspaceDocument {
+        id: DEFAULT_DOCUMENT_ID.to_string(),
+        title: "README.md".to_string(),
+    }]
+}
+
+fn load_documents() -> Vec<WorkspaceDocument> {
+    let Some(storage) = web_sys::window()
+        .and_then(|window| window.local_storage().ok())
+        .flatten()
+    else {
+        return default_documents();
+    };
+    let Some(value) = storage.get_item(DOCUMENTS_STORAGE_KEY).ok().flatten() else {
+        return default_documents();
+    };
+    let documents = serde_json::from_str::<Vec<WorkspaceDocument>>(&value)
+        .ok()
+        .filter(|documents| !documents.is_empty())
+        .unwrap_or_else(default_documents);
+    normalize_documents(documents)
+}
+
+fn normalize_documents(mut documents: Vec<WorkspaceDocument>) -> Vec<WorkspaceDocument> {
+    documents.retain(|document| document.id != "shared-notes");
+    if !documents
+        .iter()
+        .any(|document| document.id == DEFAULT_DOCUMENT_ID)
+    {
+        documents.insert(0, default_documents().remove(0));
+    }
+    documents
+}
+
+fn save_documents(documents: &[WorkspaceDocument]) {
+    let Some(storage) = web_sys::window()
+        .and_then(|window| window.local_storage().ok())
+        .flatten()
+    else {
+        return;
+    };
+    if let Ok(value) = serde_json::to_string(documents) {
+        let _ = storage.set_item(DOCUMENTS_STORAGE_KEY, &value);
+    }
+}
+
+fn document_title(title: &str) -> Option<String> {
+    let title = title.trim();
+    if title.is_empty() || title.len() > 253 {
+        return None;
+    }
+    if title.to_lowercase().ends_with(".md") {
+        Some(title.to_string())
+    } else {
+        Some(format!("{title}.md"))
+    }
+}
+
+fn document_id_from_title(title: &str) -> String {
+    let stem = title.strip_suffix(".md").unwrap_or(title);
+    let mut id = String::new();
+    let mut separator = false;
+    for character in stem.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !id.is_empty() {
+                id.push('-');
+            }
+            id.push(character.to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+        if id.len() >= 48 {
+            break;
+        }
+    }
+    if !id.is_empty() {
+        return id;
+    }
+
+    let hash = stem
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    format!("document-{hash:016x}")
 }
 
 fn awareness_user(client_id: u64) -> AwarenessUser {
@@ -1073,6 +1331,20 @@ async fn handle_channel_event(
                     break;
                 }
             }
+        }
+        ChannelEvent::Protocol(ProtocolEvent::Message(frame)) if frame.event == "documents" => {
+            let Some(documents) = frame
+                .payload
+                .as_json()
+                .and_then(|payload| payload.get("documents"))
+                .cloned()
+                .and_then(|documents| {
+                    serde_json::from_value::<Vec<WorkspaceDocument>>(documents).ok()
+                })
+            else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.apply_documents(documents, cx));
         }
         ChannelEvent::Protocol(ProtocolEvent::Message(frame))
             if frame.event == "awareness_leave" =>
