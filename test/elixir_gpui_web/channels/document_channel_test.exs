@@ -9,12 +9,12 @@ defmodule ElixirGpuiWeb.DocumentChannelTest do
     {:ok, _, first} =
       UserSocket
       |> socket("first", %{})
-      |> subscribe_and_join(DocumentChannel, topic)
+      |> subscribe_and_join(DocumentChannel, topic, %{"client_id" => "1"})
 
     {:ok, _, _second} =
       UserSocket
       |> socket("second", %{})
-      |> subscribe_and_join(DocumentChannel, topic)
+      |> subscribe_and_join(DocumentChannel, topic, %{"client_id" => "2"})
 
     document = Yex.Doc.new()
     text = Yex.Doc.get_text(document, "content")
@@ -31,17 +31,46 @@ defmodule ElixirGpuiWeb.DocumentChannelTest do
   end
 
   test "rejects malformed document ids and sync messages" do
+    assert {:error, %{reason: "invalid client id"}} =
+             UserSocket
+             |> socket("invalid-client", %{})
+             |> subscribe_and_join(DocumentChannel, "documents:valid", %{"client_id" => "NaN"})
+
     assert {:error, %{reason: "invalid document id"}} =
              UserSocket
              |> socket("invalid", %{})
-             |> subscribe_and_join(DocumentChannel, "documents:not/valid")
+             |> subscribe_and_join(DocumentChannel, "documents:not/valid", %{"client_id" => "1"})
 
     {:ok, _, socket} =
       UserSocket
       |> socket("valid", %{})
-      |> subscribe_and_join(DocumentChannel, "documents:valid")
+      |> subscribe_and_join(DocumentChannel, "documents:valid", %{"client_id" => "1"})
 
     ref = push(socket, "yjs", %{"message" => "not base64"})
     assert_reply ref, :error, %{reason: "invalid sync message"}
+  end
+
+  test "broadcasts awareness updates and removes disconnected clients" do
+    topic = "documents:awareness-#{System.unique_integer([:positive])}"
+
+    {:ok, _, first} =
+      UserSocket
+      |> socket("first", %{})
+      |> subscribe_and_join(DocumentChannel, topic, %{"client_id" => "11"})
+
+    {:ok, _, _second} =
+      UserSocket
+      |> socket("second", %{})
+      |> subscribe_and_join(DocumentChannel, topic, %{"client_id" => "22"})
+
+    message = Base.encode64(<<1, 2, 3>>)
+    ref = push(first, "awareness", %{"message" => message})
+
+    refute_reply ref, :error
+    assert_push "awareness", %{message: ^message}
+
+    Process.unlink(first.channel_pid)
+    :ok = close(first)
+    assert_push "awareness_leave", %{client_id: "11"}
   end
 end

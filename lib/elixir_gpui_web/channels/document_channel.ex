@@ -8,15 +8,32 @@ defmodule ElixirGpuiWeb.DocumentChannel do
   @document_id ~r/\A[a-zA-Z0-9_-]{1,64}\z/
 
   @impl true
-  def join("documents:" <> document_id, _payload, socket) do
-    with true <- Regex.match?(@document_id, document_id),
-         {:ok, room} <- RoomServer.ensure_started(document_id) do
-      Process.monitor(room)
-      {:ok, assign(socket, room: room, document_id: document_id)}
-    else
-      false -> {:error, %{reason: "invalid document id"}}
-      {:error, _reason} -> {:error, %{reason: "document unavailable"}}
+  def join("documents:" <> document_id, %{"client_id" => encoded_client_id}, socket)
+      when is_binary(encoded_client_id) do
+    case Integer.parse(encoded_client_id) do
+      {client_id, ""} when client_id >= 0 -> join_document(document_id, client_id, socket)
+      _ -> {:error, %{reason: "invalid client id"}}
     end
+  end
+
+  def join("documents:" <> _document_id, _payload, _socket) do
+    {:error, %{reason: "invalid client id"}}
+  end
+
+  @impl true
+  def handle_in("awareness", %{"message" => encoded}, socket)
+      when is_binary(encoded) and byte_size(encoded) <= @max_encoded_message_size do
+    with {:ok, message} <- Base.decode64(encoded),
+         true <- byte_size(message) <= @max_message_size do
+      broadcast_from!(socket, "awareness", %{message: encoded})
+      {:noreply, socket}
+    else
+      _ -> {:reply, {:error, %{reason: "invalid awareness message"}}, socket}
+    end
+  end
+
+  def handle_in("awareness", _payload, socket) do
+    {:reply, {:error, %{reason: "invalid awareness message"}}, socket}
   end
 
   @impl true
@@ -42,6 +59,31 @@ defmodule ElixirGpuiWeb.DocumentChannel do
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
+
+  @impl true
+  def terminate(_reason, %{assigns: %{client_id: client_id}} = socket) do
+    ElixirGpuiWeb.Endpoint.broadcast_from(
+      self(),
+      socket.topic,
+      "awareness_leave",
+      %{client_id: Integer.to_string(client_id)}
+    )
+
+    :ok
+  end
+
+  def terminate(_reason, _socket), do: :ok
+
+  defp join_document(document_id, client_id, socket) do
+    with true <- Regex.match?(@document_id, document_id),
+         {:ok, room} <- RoomServer.ensure_started(document_id) do
+      Process.monitor(room)
+      {:ok, assign(socket, room: room, document_id: document_id, client_id: client_id)}
+    else
+      false -> {:error, %{reason: "invalid document id"}}
+      {:error, _reason} -> {:error, %{reason: "document unavailable"}}
+    end
+  end
 
   defp push_replies({:ok, replies}, socket) do
     Enum.each(replies, fn reply ->

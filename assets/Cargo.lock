@@ -1451,6 +1451,7 @@ dependencies = [
  "phoenix-channel-client",
  "phoenix-channel-runtime",
  "phoenix-channel-runtime-web",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

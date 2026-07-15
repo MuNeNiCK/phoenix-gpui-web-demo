@@ -14,6 +14,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/refmdio/gpui-component", branch = "fix/editor-gutter-background", default-features = false }
 gpui-component-assets = { git = "https://github.com/refmdio/gpui-component", branch = "fix/editor-gutter-background" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 log = "0.4"
 yrs = { version = "=0.25.0", features = ["sync"] }
 base64 = "0.22"
