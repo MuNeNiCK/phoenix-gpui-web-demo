@@ -7,16 +7,17 @@ use gpui::{
     WeakEntity, Window, WindowBounds, WindowOptions, px, size,
 };
 use gpui_component::{
-    ActiveTheme, IconName, IndexPath, Root, Theme, ThemeMode, ThemeRegistry, WindowExt,
-    breadcrumb::Breadcrumb,
-    button::Button,
+    ActiveTheme, IconName, IndexPath, Root, Selectable, Theme, ThemeMode, ThemeRegistry, WindowExt,
+    button::{Button, ButtonGroup},
     form::{field, v_form},
     h_flex,
     input::{Input, InputEvent, InputState},
+    resizable::{h_resizable, resizable_panel},
     select::{Select, SelectEvent, SelectState},
     sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
     status_bar::StatusBar,
-    tab::{Tab, TabBar},
+    text::TextView,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_component_assets::Assets;
@@ -80,6 +81,13 @@ enum ClientCommand {
     Sync(Vec<u8>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Editor,
+    Split,
+    Preview,
+}
+
 struct WorkspaceApp {
     awareness: Awareness,
     text: TextRef,
@@ -87,6 +95,7 @@ struct WorkspaceApp {
     search: Entity<InputState>,
     theme_select: Entity<SelectState<Vec<SharedString>>>,
     connection: ConnectionState,
+    view_mode: ViewMode,
     outbound: UnboundedSender<ClientCommand>,
     _subscriptions: Vec<Subscription>,
     _socket_task: Task<()>,
@@ -158,6 +167,7 @@ impl WorkspaceApp {
             search,
             theme_select,
             connection: ConnectionState::Connecting,
+            view_mode: ViewMode::Split,
             outbound,
             _subscriptions: vec![editor_subscription, search_subscription, theme_subscription],
             _socket_task: socket_task,
@@ -347,7 +357,14 @@ impl Render for WorkspaceApp {
             ConnectionState::Reconnecting => SharedString::from("Waiting for the server"),
             ConnectionState::Error(error) => format!("Synchronization error: {error}").into(),
         };
+        let (connection_icon, connection_color) = match &self.connection {
+            ConnectionState::Connecting => (IconName::LoaderCircle, theme.muted_foreground),
+            ConnectionState::Online => (IconName::CircleCheck, theme.success),
+            ConnectionState::Reconnecting => (IconName::LoaderCircle, theme.warning),
+            ConnectionState::Error(_) => (IconName::TriangleAlert, theme.danger),
+        };
         let theme_select = self.theme_select.clone();
+        let view_mode = self.view_mode;
 
         let search_query = self.search.read(cx).value();
         let query = search_query.trim().to_lowercase();
@@ -396,32 +413,101 @@ impl Render for WorkspaceApp {
             );
 
         let editor = v_flex()
-            .flex_1()
+            .w_full()
             .h_full()
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
-                TabBar::new("editor-tabs")
-                    .selected_index(0)
-                    .child(Tab::new().label("shared-notes.md")),
-            )
-            .child(
-                h_flex().min_w_0().overflow_hidden().p_2().child(
-                    Breadcrumb::new()
-                        .overflow_hidden()
-                        .child("workspace")
-                        .child("shared-notes.md")
-                        .child("document"),
-                ),
-            )
-            .child(
-                v_flex().flex_1().min_h(px(0.0)).p_2().child(
+                v_flex().flex_1().min_h(px(0.0)).child(
                     Input::new(&self.editor)
+                        .bordered(false)
                         .focus_bordered(false)
                         .h_full()
                         .w_full(),
                 ),
             );
+
+        let preview = v_flex()
+            .w_full()
+            .h_full()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(
+                v_flex().w_full().flex_1().min_h(px(0.0)).child(
+                    TextView::markdown("markdown-preview", value.clone())
+                        .scrollable(true)
+                        .selectable(true)
+                        .p_4(),
+                ),
+            );
+
+        let mode_switcher = ButtonGroup::new("view-mode")
+            .child(
+                Button::new("editor-mode")
+                    .icon(IconName::File)
+                    .tooltip("Editor")
+                    .selected(view_mode == ViewMode::Editor),
+            )
+            .child(
+                Button::new("split-mode")
+                    .icon(IconName::PanelRight)
+                    .tooltip("Split")
+                    .selected(view_mode == ViewMode::Split),
+            )
+            .child(
+                Button::new("preview-mode")
+                    .icon(IconName::Eye)
+                    .tooltip("Preview")
+                    .selected(view_mode == ViewMode::Preview),
+            )
+            .on_click(cx.listener(|this, selected: &Vec<usize>, _, cx| {
+                let Some(selected) = selected.first() else {
+                    return;
+                };
+                this.view_mode = match selected {
+                    0 => ViewMode::Editor,
+                    1 => ViewMode::Split,
+                    2 => ViewMode::Preview,
+                    _ => return,
+                };
+                cx.notify();
+            }));
+
+        let toolbar = h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .p_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(mode_switcher)
+            .child(
+                h_flex()
+                    .id("connection-status")
+                    .size_8()
+                    .items_center()
+                    .justify_center()
+                    .text_color(connection_color)
+                    .child(connection_icon)
+                    .tooltip({
+                        let connection_detail = connection_detail.clone();
+                        move |window, cx| Tooltip::new(connection_detail.clone()).build(window, cx)
+                    }),
+            );
+
+        let document_content = match view_mode {
+            ViewMode::Editor => editor.into_any_element(),
+            ViewMode::Preview => preview.into_any_element(),
+            ViewMode::Split => h_resizable("document-panes")
+                .child(resizable_panel().child(editor))
+                .child(resizable_panel().child(preview))
+                .into_any_element(),
+        };
+
+        let document = v_flex()
+            .size_full()
+            .child(toolbar)
+            .child(v_flex().flex_1().min_h_0().child(document_content));
 
         let status = StatusBar::new()
             .left(connection_detail)
@@ -431,7 +517,11 @@ impl Render for WorkspaceApp {
             .right("Markdown")
             .right("GPUI Web");
 
-        let body = h_flex().flex_1().min_h_0().child(sidebar).child(editor);
+        let body = h_flex()
+            .flex_1()
+            .min_h_0()
+            .child(sidebar)
+            .child(v_flex().flex_1().min_w_0().h_full().child(document));
 
         v_flex()
             .size_full()
