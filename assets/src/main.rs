@@ -3,17 +3,23 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::{FutureExt, StreamExt, select};
 use gpui::prelude::*;
 use gpui::{
-    Anchor, App, AsyncApp, Bounds, Context, Entity, FontFallbacks, FontWeight, Hsla, SharedString,
-    Subscription, Task, WeakEntity, Window, WindowBounds, WindowOptions, div, px, size,
+    App, AsyncApp, Bounds, Context, Entity, FontFallbacks, SharedString, Subscription, Task,
+    WeakEntity, Window, WindowBounds, WindowOptions, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Root, Selectable, Sizable, Theme, ThemeMode, ThemeRegistry,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme, IconName, IndexPath, Root, Theme, ThemeMode, ThemeRegistry, WindowExt,
+    breadcrumb::Breadcrumb,
+    button::Button,
+    form::{field, v_form},
+    h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{DropdownMenu as _, PopupMenuItem},
-    tag::Tag,
-    try_parse_color,
+    select::{Select, SelectEvent, SelectState},
+    sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
+    status_bar::StatusBar,
+    tab::{Tab, TabBar},
+    v_flex,
 };
+use gpui_component_assets::Assets;
 use phoenix_channel_client::{
     Channel, ChannelEvent, Options as ChannelOptions, Socket, SocketEvent, static_join_payload,
 };
@@ -74,22 +80,13 @@ enum ClientCommand {
     Sync(Vec<u8>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SidebarSection {
-    Files,
-    Search,
-    Sync,
-}
-
 struct WorkspaceApp {
     awareness: Awareness,
     text: TextRef,
     editor: Entity<InputState>,
     search: Entity<InputState>,
+    theme_select: Entity<SelectState<Vec<SharedString>>>,
     connection: ConnectionState,
-    sidebar_section: SidebarSection,
-    sidebar_collapsed: bool,
-    workspace_open: bool,
     outbound: UnboundedSender<ClientCommand>,
     _subscriptions: Vec<Subscription>,
     _socket_task: Task<()>,
@@ -113,6 +110,17 @@ impl WorkspaceApp {
                 .placeholder("Start writing...")
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search files"));
+        let themes = ThemeRegistry::global(cx)
+            .sorted_themes()
+            .into_iter()
+            .map(|theme| theme.name.clone())
+            .collect::<Vec<_>>();
+        let active_theme = cx.theme().theme_name();
+        let selected_theme = themes
+            .iter()
+            .position(|theme_name| theme_name == active_theme)
+            .map(|index| IndexPath::default().row(index));
+        let theme_select = cx.new(|cx| SelectState::new(themes, selected_theme, window, cx));
         let (outbound, receiver) = unbounded();
 
         let editor_subscription = cx.subscribe_in(&editor, window, {
@@ -130,6 +138,16 @@ impl WorkspaceApp {
                 cx.notify();
             }
         });
+        let theme_subscription = cx.subscribe_in(
+            &theme_select,
+            window,
+            |_, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+                let SelectEvent::Confirm(Some(theme_name)) = event else {
+                    return;
+                };
+                select_theme(theme_name, window, cx);
+            },
+        );
 
         let socket_task = Self::socket_task(cx, receiver);
 
@@ -138,12 +156,10 @@ impl WorkspaceApp {
             text,
             editor,
             search,
+            theme_select,
             connection: ConnectionState::Connecting,
-            sidebar_section: SidebarSection::Files,
-            sidebar_collapsed: false,
-            workspace_open: true,
             outbound,
-            _subscriptions: vec![editor_subscription, search_subscription],
+            _subscriptions: vec![editor_subscription, search_subscription, theme_subscription],
             _socket_task: socket_task,
         }
     }
@@ -314,525 +330,115 @@ impl WorkspaceApp {
 }
 
 impl Render for WorkspaceApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog_layer = Root::render_dialog_layer(window, cx);
         let theme = cx.theme();
-        let background = theme.background;
-        let foreground = active_theme_foreground(theme);
-        let muted_foreground = theme.muted_foreground;
-        let border = theme.border;
-        let sidebar = theme.sidebar;
-        let sidebar_foreground = theme.sidebar_foreground;
-        let tab_bar = theme.tab_bar;
-        let tab_active = theme.tab_active;
-        let status_bar = theme.status_bar;
-        let primary = theme.primary;
         let font = theme.font_family.clone();
-        let mono_font = theme.mono_font_family.clone();
         let mut default_font = gpui::font(font);
         default_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
             JAPANESE_FONT_FAMILY.to_string(),
         ]));
         let value = self.editor.read(cx).value();
         let line_count = value.lines().count().max(1);
-        let character_count = value.chars().count();
 
-        let (connection_tag, connection_detail) = match &self.connection {
-            ConnectionState::Connecting => (
-                Tag::warning()
-                    .small()
-                    .outline()
-                    .rounded_full()
-                    .child("Connecting"),
-                SharedString::from("Opening Phoenix Channel"),
-            ),
-            ConnectionState::Online => (
-                Tag::success()
-                    .small()
-                    .outline()
-                    .rounded_full()
-                    .child("Connected"),
-                SharedString::from("All changes synchronized"),
-            ),
-            ConnectionState::Reconnecting => (
-                Tag::warning()
-                    .small()
-                    .outline()
-                    .rounded_full()
-                    .child("Reconnecting"),
-                SharedString::from("Waiting for the server"),
-            ),
-            ConnectionState::Error(error) => (
-                Tag::danger()
-                    .small()
-                    .outline()
-                    .rounded_full()
-                    .child("Offline"),
-                format!("Synchronization error: {error}").into(),
-            ),
+        let connection_detail = match &self.connection {
+            ConnectionState::Connecting => SharedString::from("Opening Phoenix Channel"),
+            ConnectionState::Online => SharedString::from("All changes synchronized"),
+            ConnectionState::Reconnecting => SharedString::from("Waiting for the server"),
+            ConnectionState::Error(error) => format!("Synchronization error: {error}").into(),
         };
-
-        let title_bar = div()
-            .h(px(44.0))
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(12.0))
-            .bg(theme.title_bar)
-            .border_b_1()
-            .border_color(theme.title_bar_border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .size(px(22.0))
-                            .rounded(px(5.0))
-                            .bg(primary)
-                            .text_color(theme.primary_foreground)
-                            .font_weight(FontWeight::BOLD)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("P"),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Phoenix Workspace"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(muted_foreground)
-                            .child("workspace / shared-notes.md"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(connection_tag)
-                    .child(
-                        Button::new("theme-toggle")
-                            .small()
-                            .ghost()
-                            .label(cx.theme().theme_name().clone())
-                            .dropdown_caret(true)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, |menu, _, cx| {
-                                let active_theme = cx.theme().theme_name().clone();
-                                let themes = ThemeRegistry::global(cx)
-                                    .sorted_themes()
-                                    .into_iter()
-                                    .map(|theme| theme.name.clone())
-                                    .collect::<Vec<_>>();
-
-                                themes
-                                    .into_iter()
-                                    .fold(menu, |menu, theme_name| {
-                                        let checked = theme_name == active_theme;
-                                        menu.item(
-                                            PopupMenuItem::new(theme_name.clone())
-                                                .checked(checked)
-                                                .on_click(move |_, window, cx| {
-                                                    select_theme(&theme_name, window, cx);
-                                                }),
-                                        )
-                                    })
-                                    .scrollable(true)
-                            }),
-                    ),
-            );
-
-        let activity_button = |id: &'static str, label: &'static str, section: SidebarSection| {
-            Button::new(id)
-                .small()
-                .ghost()
-                .compact()
-                .w(px(36.0))
-                .h(px(34.0))
-                .font_family(mono_font.clone())
-                .label(label)
-                .selected(self.sidebar_section == section && !self.sidebar_collapsed)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.sidebar_section = section;
-                    this.sidebar_collapsed = false;
-                    cx.notify();
-                }))
-        };
-
-        let activity_bar = div()
-            .w(px(52.0))
-            .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(5.0))
-            .py(px(7.0))
-            .bg(sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
-            .child(
-                Button::new("sidebar-toggle")
-                    .small()
-                    .ghost()
-                    .compact()
-                    .w(px(36.0))
-                    .h(px(32.0))
-                    .font_family(mono_font.clone())
-                    .label(if self.sidebar_collapsed { ">" } else { "<" })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar_collapsed = !this.sidebar_collapsed;
-                        cx.notify();
-                    })),
-            )
-            .child(div().w(px(28.0)).h(px(1.0)).my(px(2.0)).bg(border))
-            .child(activity_button(
-                "activity-files",
-                "F",
-                SidebarSection::Files,
-            ))
-            .child(activity_button(
-                "activity-search",
-                "/",
-                SidebarSection::Search,
-            ))
-            .child(activity_button("activity-sync", "S", SidebarSection::Sync));
-
-        let file_row = |id: &'static str, name: &'static str, active: bool| {
-            div()
-                .id(id)
-                .h(px(27.0))
-                .w_full()
-                .flex()
-                .items_center()
-                .rounded(px(4.0))
-                .px(px(8.0))
-                .text_size(px(12.0))
-                .text_color(if active {
-                    theme.sidebar_accent_foreground
-                } else {
-                    muted_foreground
-                })
-                .when(active, |this| this.bg(theme.sidebar_accent))
-                .hover(|this| this.bg(theme.sidebar_accent))
-                .child(name)
-        };
-
-        let files_panel = div()
-            .flex_1()
-            .min_h(px(0.0))
-            .p(px(6.0))
-            .child(
-                div()
-                    .id("workspace-toggle")
-                    .h(px(28.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.0))
-                    .px(px(7.0))
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .hover(|this| this.bg(theme.sidebar_accent))
-                    .child(if self.workspace_open {
-                        "v  WORKSPACE"
-                    } else {
-                        ">  WORKSPACE"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_open = !this.workspace_open;
-                        cx.notify();
-                    })),
-            )
-            .when(self.workspace_open, |this| {
-                this.child(
-                    div()
-                        .ml(px(12.0))
-                        .mt(px(2.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(file_row("file-shared-notes", "M  shared-notes.md", true))
-                        .child(file_row("file-readme", "-  README.md", false))
-                        .child(file_row("file-lib", ">  lib", false))
-                        .child(file_row("file-config", ">  config", false)),
-                )
-            });
+        let theme_select = self.theme_select.clone();
 
         let search_query = self.search.read(cx).value();
-        let search_matches = search_query.trim().is_empty()
-            || "shared-notes.md".contains(&search_query.to_lowercase());
-        let search_panel = div()
-            .flex_1()
-            .min_h(px(0.0))
-            .p(px(10.0))
-            .child(
-                Input::new(&self.search)
-                    .small()
-                    .w_full()
-                    .text_color(foreground),
-            )
-            .child(
-                div()
-                    .mt(px(12.0))
-                    .mb(px(6.0))
-                    .text_size(px(10.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(muted_foreground)
-                    .child("RESULTS"),
-            )
-            .when(search_matches, |this| {
-                this.child(
-                    div()
-                        .rounded(px(5.0))
-                        .bg(theme.sidebar_accent)
-                        .px(px(9.0))
-                        .py(px(7.0))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(sidebar_foreground)
-                                .child("shared-notes.md"),
-                        )
-                        .child(
-                            div()
-                                .mt(px(2.0))
-                                .text_size(px(10.0))
-                                .text_color(muted_foreground)
-                                .child("workspace"),
-                        ),
-                )
-            })
-            .when(!search_matches, |this| {
-                this.child(
-                    div()
-                        .py(px(18.0))
-                        .text_center()
-                        .text_size(px(12.0))
-                        .text_color(muted_foreground)
-                        .child("No matching files"),
-                )
-            });
+        let query = search_query.trim().to_lowercase();
+        let matches = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+        let mut files = Vec::new();
+        if matches("shared-notes.md") {
+            files.push(
+                SidebarMenuItem::new("shared-notes.md")
+                    .icon(IconName::File)
+                    .active(true),
+            );
+        }
+        if matches("README.md") {
+            files.push(SidebarMenuItem::new("README.md").icon(IconName::File));
+        }
+        if matches("lib") {
+            files.push(SidebarMenuItem::new("lib").icon(IconName::Folder));
+        }
+        if matches("config") {
+            files.push(SidebarMenuItem::new("config").icon(IconName::Folder));
+        }
+        if files.is_empty() {
+            files.push(SidebarMenuItem::new("No matching files").disable(true));
+        }
 
-        let sync_color = match &self.connection {
-            ConnectionState::Online => theme.success,
-            ConnectionState::Error(_) => theme.danger,
-            ConnectionState::Connecting | ConnectionState::Reconnecting => theme.warning,
-        };
-        let sync_panel = div()
-            .flex_1()
-            .min_h(px(0.0))
-            .p(px(12.0))
-            .child(
-                div()
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(theme.sidebar_border)
-                    .bg(background)
-                    .p(px(12.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(div().size(px(8.0)).rounded_full().bg(sync_color))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(connection_detail.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(10.0))
-                            .text_size(px(11.0))
-                            .text_color(muted_foreground)
-                            .child("Phoenix Channel"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(3.0))
-                            .font_family(mono_font.clone())
-                            .text_size(px(11.0))
-                            .child(TOPIC),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(12.0))
-                    .text_size(px(11.0))
-                    .text_color(muted_foreground)
-                    .line_height(px(17.0))
-                    .child("Edits are stored locally first and synchronized when the channel is available."),
+        let sidebar = Sidebar::new("workspace-sidebar")
+            .header(Input::new(&self.search))
+            .child(SidebarGroup::new("Workspace").child(SidebarMenu::new().children(files)))
+            .footer(
+                Button::new("settings")
+                    .icon(IconName::Settings2)
+                    .label("Settings")
+                    .on_click(move |_, window, cx| {
+                        let theme_select = theme_select.clone();
+                        window.open_dialog(cx, move |dialog, _, _| {
+                            dialog.title("Settings").child(
+                                v_form().child(
+                                    field()
+                                        .label("Theme")
+                                        .description("Choose the application color theme.")
+                                        .child(Select::new(&theme_select)),
+                                ),
+                            )
+                        });
+                    }),
             );
 
-        let sidebar_title = match self.sidebar_section {
-            SidebarSection::Files => "EXPLORER",
-            SidebarSection::Search => "SEARCH",
-            SidebarSection::Sync => "SYNC",
-        };
-        let sidebar_content = match self.sidebar_section {
-            SidebarSection::Files => files_panel.into_any_element(),
-            SidebarSection::Search => search_panel.into_any_element(),
-            SidebarSection::Sync => sync_panel.into_any_element(),
-        };
-
-        let explorer = div()
-            .w(px(244.0))
-            .h_full()
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .bg(sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
-            .child(
-                div()
-                    .h(px(38.0))
-                    .flex()
-                    .items_center()
-                    .px(px(12.0))
-                    .border_b_1()
-                    .border_color(theme.sidebar_border)
-                    .text_size(px(10.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(muted_foreground)
-                    .child(sidebar_title),
-            )
-            .child(sidebar_content)
-            .child(
-                div()
-                    .p(px(11.0))
-                    .border_t_1()
-                    .border_color(theme.sidebar_border)
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(muted_foreground)
-                            .child("CURRENT DOCUMENT"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(5.0))
-                            .text_size(px(11.0))
-                            .text_color(sidebar_foreground)
-                            .child(format!("{line_count} lines · {character_count} characters")),
-                    ),
-            );
-
-        let editor = div()
+        let editor = v_flex()
             .flex_1()
             .h_full()
             .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .bg(background)
+            .overflow_hidden()
             .child(
-                div()
-                    .h(px(36.0))
-                    .w_full()
-                    .flex()
-                    .items_end()
-                    .bg(tab_bar)
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
-                        div()
-                            .h_full()
-                            .min_w(px(180.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .px(px(12.0))
-                            .bg(tab_active)
-                            .border_r_1()
-                            .border_color(border)
-                            .text_size(px(13.0))
-                            .child("M")
-                            .child("shared-notes.md")
-                            .child(div().ml_auto().text_color(muted_foreground).child("×")),
-                    ),
+                TabBar::new("editor-tabs")
+                    .selected_index(0)
+                    .child(Tab::new().label("shared-notes.md")),
             )
             .child(
-                div()
-                    .h(px(30.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .px(px(14.0))
-                    .border_b_1()
-                    .border_color(border)
-                    .text_size(px(12.0))
-                    .text_color(muted_foreground)
-                    .child("workspace  /  shared-notes.md  /  document"),
+                h_flex().min_w_0().overflow_hidden().p_2().child(
+                    Breadcrumb::new()
+                        .overflow_hidden()
+                        .child("workspace")
+                        .child("shared-notes.md")
+                        .child("document"),
+                ),
             )
             .child(
-                div().flex_1().min_h(px(0.0)).p(px(8.0)).child(
+                v_flex().flex_1().min_h(px(0.0)).p_2().child(
                     Input::new(&self.editor)
+                        .focus_bordered(false)
                         .h_full()
-                        .w_full()
-                        .text_color(foreground)
-                        .appearance(false)
-                        .bordered(false)
-                        .focus_bordered(false),
+                        .w_full(),
                 ),
             );
 
-        let status = div()
-            .h(px(25.0))
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px(px(10.0))
-            .bg(status_bar)
-            .border_t_1()
-            .border_color(theme.status_bar_border)
-            .text_size(px(11.0))
-            .text_color(muted_foreground)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(14.0))
-                    .child(connection_detail)
-                    .child(format!("Document: {DOCUMENT_ID}")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(14.0))
-                    .child(format!("{line_count} lines"))
-                    .child("UTF-8")
-                    .child("Markdown")
-                    .child("GPUI Web"),
-            );
+        let status = StatusBar::new()
+            .left(connection_detail)
+            .left(format!("Document: {DOCUMENT_ID}"))
+            .right(format!("{line_count} lines"))
+            .right("UTF-8")
+            .right("Markdown")
+            .right("GPUI Web");
 
-        div()
+        let body = h_flex().flex_1().min_h_0().child(sidebar).child(editor);
+
+        v_flex()
             .size_full()
-            .flex()
-            .flex_col()
-            .bg(background)
-            .text_color(foreground)
             .font(default_font)
-            .child(title_bar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .w_full()
-                    .flex()
-                    .child(activity_bar)
-                    .when(!self.sidebar_collapsed, |this| this.child(explorer))
-                    .child(editor),
-            )
+            .child(body)
             .child(status)
+            .children(dialog_layer)
     }
 }
 
@@ -1033,21 +639,6 @@ fn load_embedded_themes(cx: &mut App) {
     }
 }
 
-fn active_theme_foreground(theme: &Theme) -> Hsla {
-    let config = if theme.is_dark() {
-        &theme.dark_theme
-    } else {
-        &theme.light_theme
-    };
-
-    config
-        .colors
-        .foreground
-        .as_deref()
-        .and_then(|color| try_parse_color(color).ok())
-        .unwrap_or(theme.foreground)
-}
-
 fn select_theme(theme_name: &str, window: &mut Window, cx: &mut App) {
     let Some(next_theme) = ThemeRegistry::global(cx).themes().get(theme_name).cloned() else {
         return;
@@ -1075,41 +666,43 @@ fn main() {
         return;
     }
 
-    let application = gpui_platform::single_threaded_web().run_embedded(|cx: &mut App| {
-        gpui_component::init(cx);
-        load_embedded_themes(cx);
-        cx.text_system()
-            .add_fonts(vec![Cow::Borrowed(
-                include_bytes!("../fonts/NotoSansJP-Regular.otf").as_slice(),
-            )])
-            .expect("failed to load the bundled Japanese font");
-        Theme::change(ThemeMode::Dark, None, cx);
-        cx.global_mut::<Theme>().font_family = "IBM Plex Sans".into();
-        cx.global_mut::<Theme>().mono_font_family = "Lilex".into();
+    let application = gpui_platform::single_threaded_web()
+        .with_assets(Assets::new(
+            "https://longbridge.github.io/gpui-component/gallery/",
+        ))
+        .run_embedded(|cx: &mut App| {
+            gpui_component::init(cx);
+            load_embedded_themes(cx);
+            cx.text_system()
+                .add_fonts(vec![Cow::Borrowed(
+                    include_bytes!("../fonts/NotoSansJP-Regular.otf").as_slice(),
+                )])
+                .expect("failed to load the bundled Japanese font");
+            Theme::change(ThemeMode::Dark, None, cx);
 
-        let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
-        let window = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|cx| WorkspaceApp::new(window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        );
+            let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
+            let window = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let view = cx.new(|cx| WorkspaceApp::new(window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            );
 
-        match window {
-            Ok(_) => {
-                hide_boot_status();
-                cx.activate(true);
+            match window {
+                Ok(_) => {
+                    hide_boot_status();
+                    cx.activate(true);
+                }
+                Err(error) => {
+                    log::error!("failed to open GPUI Web window: {error:#}");
+                    show_boot_error(&format!("Failed to open GPUI Web window: {error:#}"));
+                }
             }
-            Err(error) => {
-                log::error!("failed to open GPUI Web window: {error:#}");
-                show_boot_error(&format!("Failed to open GPUI Web window: {error:#}"));
-            }
-        }
-    });
+        });
 
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
 }
