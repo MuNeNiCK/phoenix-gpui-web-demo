@@ -39,6 +39,18 @@ defmodule ElixirGpuiWeb.DocumentChannel do
     {:reply, {:error, %{reason: "invalid awareness message"}}, socket}
   end
 
+  def handle_in("delete_document", %{"document_id" => document_id}, socket)
+      when is_binary(document_id) do
+    case DocumentCatalog.delete(document_id) do
+      :ok -> {:noreply, socket}
+      {:error, :protected_document} -> {:reply, {:error, %{reason: "protected document"}}, socket}
+    end
+  end
+
+  def handle_in("delete_document", _payload, socket) do
+    {:reply, {:error, %{reason: "invalid document id"}}, socket}
+  end
+
   @impl true
   def handle_in("yjs", %{"message" => encoded}, socket)
       when is_binary(encoded) and byte_size(encoded) <= @max_encoded_message_size do
@@ -89,14 +101,16 @@ defmodule ElixirGpuiWeb.DocumentChannel do
 
   defp join_document(document_id, client_id, documents, socket) do
     with true <- Regex.match?(@document_id, document_id),
+         :ok <- DocumentCatalog.merge(documents),
+         false <- DocumentCatalog.deleted?(document_id),
          {:ok, room} <- RoomServer.ensure_started(document_id) do
-      :ok = DocumentCatalog.merge(documents)
       :ok = DocumentCatalog.subscribe()
       send(self(), :push_documents)
       Process.monitor(room)
       {:ok, assign(socket, room: room, document_id: document_id, client_id: client_id)}
     else
       false -> {:error, %{reason: "invalid document id"}}
+      true -> {:error, %{reason: "document deleted"}}
       {:error, _reason} -> {:error, %{reason: "document unavailable"}}
     end
   end

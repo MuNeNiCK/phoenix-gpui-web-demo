@@ -89,7 +89,7 @@ defmodule ElixirGpuiWeb.DocumentChannelTest do
     assert_push "documents", %{documents: initial_documents}
     refute Enum.any?(initial_documents, &(&1["id"] == document_id))
 
-    {:ok, _, _second} =
+    {:ok, _, second} =
       UserSocket
       |> socket("catalog-second", %{})
       |> subscribe_and_join(DocumentChannel, "documents:#{document_id}", %{
@@ -99,5 +99,23 @@ defmodule ElixirGpuiWeb.DocumentChannelTest do
 
     assert_push "documents", %{documents: documents}
     assert Enum.any?(documents, &(&1 == document))
+    assert_push "documents", %{documents: documents}
+    assert Enum.any?(documents, &(&1 == document))
+
+    ref = push(second, "delete_document", %{"document_id" => document_id})
+    refute_reply ref, :error
+    assert_push "documents", %{documents: documents}
+    refute Enum.any?(documents, &(&1["id"] == document_id))
+
+    assert {:error, %{reason: "document deleted"}} =
+             UserSocket
+             |> socket("deleted-document", %{})
+             |> subscribe_and_join(DocumentChannel, "documents:#{document_id}", %{
+               "client_id" => "33",
+               "documents" => [document]
+             })
+
+    ref = push(second, "delete_document", %{"document_id" => "readme"})
+    assert_reply ref, :error, %{reason: "protected document"}
   end
 end

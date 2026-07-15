@@ -11,7 +11,8 @@ use gpui_component::{
     ActiveTheme, IconName, IndexPath, Root, Selectable, Sizable, Theme, ThemeMode, ThemeRegistry,
     WindowExt,
     avatar::{Avatar, AvatarGroup},
-    button::{Button, ButtonGroup},
+    button::{Button, ButtonGroup, ButtonVariant, ButtonVariants},
+    dialog::DialogButtonProps,
     form::{field, v_form},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -88,6 +89,7 @@ enum ConnectionState {
 enum ClientCommand {
     Sync(Vec<u8>),
     Awareness(Vec<u8>),
+    DeleteDocument(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -466,6 +468,12 @@ impl WorkspaceApp {
             .unbounded_send(ClientCommand::Awareness(message));
     }
 
+    fn delete_document(&self, document_id: String) {
+        let _ = self
+            .outbound
+            .unbounded_send(ClientCommand::DeleteDocument(document_id));
+    }
+
     fn open_document(&mut self, document_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.document_id == document_id {
             return;
@@ -547,13 +555,26 @@ impl WorkspaceApp {
         true
     }
 
-    fn apply_documents(&mut self, documents: Vec<WorkspaceDocument>, cx: &mut Context<Self>) {
+    fn apply_documents(
+        &mut self,
+        documents: Vec<WorkspaceDocument>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if documents.is_empty() {
             return;
         }
         self.documents = normalize_documents(documents);
         save_documents(&self.documents);
-        cx.notify();
+        if !self
+            .documents
+            .iter()
+            .any(|document| document.id == self.document_id)
+        {
+            self.open_document(DEFAULT_DOCUMENT_ID.to_string(), window, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn socket_task(
@@ -668,6 +689,15 @@ impl WorkspaceApp {
                             set_connection_state(&this, cx, ConnectionState::Reconnecting);
                         }
                     }
+                    Action::Command(Some(ClientCommand::DeleteDocument(document_id))) => {
+                        if channel
+                            .cast("delete_document", json!({"document_id": document_id}))
+                            .await
+                            .is_err()
+                        {
+                            set_connection_state(&this, cx, ConnectionState::Reconnecting);
+                        }
+                    }
                     Action::Channel(None) | Action::Socket(None) | Action::Command(None) => return,
                 }
             }
@@ -734,16 +764,62 @@ impl Render for WorkspaceApp {
             .iter()
             .filter(|document| matches(&document.title))
         {
-            let app = cx.entity();
+            let open_app = cx.entity();
             let document_id = document.id.clone();
+            let delete_app = cx.entity();
+            let delete_document_id = document.id.clone();
+            let delete_document_title = document.title.clone();
+            let deletable = document.id != DEFAULT_DOCUMENT_ID;
             files.push(
                 SidebarMenuItem::new(document.title.clone())
                     .icon(IconName::File)
                     .active(document.id == self.document_id)
                     .on_click(move |_, window, cx| {
-                        app.update(cx, |this, cx| {
+                        open_app.update(cx, |this, cx| {
                             this.open_document(document_id.clone(), window, cx)
                         });
+                    })
+                    .when(deletable, |item| {
+                        item.suffix(move |_, _| {
+                            let app = delete_app.clone();
+                            let document_id = delete_document_id.clone();
+                            let document_title = delete_document_title.clone();
+                            Button::new(format!("delete-{document_id}"))
+                                .icon(IconName::Delete)
+                                .xsmall()
+                                .ghost()
+                                .danger()
+                                .tooltip("Delete document")
+                                .on_click(move |_, window, cx| {
+                                    let app = app.clone();
+                                    let document_id = document_id.clone();
+                                    let description = format!(
+                                        "Delete {document_title}? This action cannot be undone."
+                                    );
+                                    window.open_alert_dialog(cx, move |dialog, _, _| {
+                                        dialog
+                                            .title("Delete document")
+                                            .description(description.clone())
+                                            .button_props(
+                                                DialogButtonProps::default()
+                                                    .ok_variant(ButtonVariant::Danger)
+                                                    .ok_text("Delete")
+                                                    .cancel_text("Cancel")
+                                                    .show_cancel(true),
+                                            )
+                                            .on_ok({
+                                                let app = app.clone();
+                                                let document_id = document_id.clone();
+                                                move |_, _, cx| {
+                                                    app.update(cx, |this, _| {
+                                                        this.delete_document(document_id.clone())
+                                                    });
+                                                    true
+                                                }
+                                            })
+                                    });
+                                })
+                        })
                     }),
             );
         }
@@ -1344,7 +1420,9 @@ async fn handle_channel_event(
             else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| this.apply_documents(documents, cx));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.apply_documents(documents, window, cx)
+            });
         }
         ChannelEvent::Protocol(ProtocolEvent::Message(frame))
             if frame.event == "awareness_leave" =>
